@@ -19,7 +19,7 @@ It creates a Splunk search job, polls for completion, and pages results through 
 
 ```bash
 # Example, adjust for your packaging
-wget https://github.com/extkljajicm/mnemosyne-splunk-datasource/releases/download/v1.0.0/mnemosyne-splunk-datasource-1.0.0.zip
+wget https://github.com/kljama/mnemosyne-splunk-datasource/releases/download/v1.0.0/mnemosyne-splunk-datasource-1.0.0.zip
 cd /var/lib/grafana/plugins/
 unzip mnemosyne-splunk-datasource-1.0.0.zip
 ```

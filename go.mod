@@ -1,4 +1,4 @@
-module github.com/extkljajicm/mnemosyne-splunk-datasource
+module github.com/kljama/mnemosyne-splunk-datasource
 
 go 1.22
 
