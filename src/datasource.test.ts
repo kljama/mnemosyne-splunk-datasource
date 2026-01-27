@@ -28,7 +28,7 @@ describe('DataSource Performance', () => {
   });
 
   it('benchmark query processing', async () => {
-    const rowCount = 1000;
+    const rowCount = 1000000;
     const rows = Array.from({ length: rowCount }, (_, i) => ({
       _time: new Date().toISOString(),
       host: `host-${i}`,
