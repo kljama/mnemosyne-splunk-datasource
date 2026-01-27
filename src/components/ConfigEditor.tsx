@@ -78,29 +78,24 @@ export class ConfigEditor extends PureComponent<Props> {
   };
 
   private onNumber =
-    (key: keyof SplunkDataSourceOptions | keyof typeof DEFAULTS) =>
-    (e: ChangeEvent<HTMLInputElement>) => {
+    (key: keyof SplunkDataSourceOptions | keyof typeof DEFAULTS) => (e: ChangeEvent<HTMLInputElement>) => {
       const v = Number(e.currentTarget.value);
       this.update({ [key as any]: Number.isFinite(v) && v >= 0 ? v : 0 } as any);
     };
 
   private onText =
-    (key: keyof SplunkDataSourceOptions | keyof typeof DEFAULTS) =>
-    (e: ChangeEvent<HTMLInputElement>) => {
+    (key: keyof SplunkDataSourceOptions | keyof typeof DEFAULTS) => (e: ChangeEvent<HTMLInputElement>) => {
       this.update({ [key as any]: e.currentTarget.value } as any);
     };
 
   private onTextArea =
-    (key: keyof SplunkDataSourceOptions | keyof typeof DEFAULTS) =>
-    (e: ChangeEvent<HTMLTextAreaElement>) => {
+    (key: keyof SplunkDataSourceOptions | keyof typeof DEFAULTS) => (e: ChangeEvent<HTMLTextAreaElement>) => {
       this.update({ [key as any]: e.currentTarget.value } as any);
     };
 
-  private onToggle =
-    (key: keyof SplunkDataSourceOptions | keyof typeof DEFAULTS) =>
-    (v: boolean) => {
-      this.update({ [key as any]: v } as any);
-    };
+  private onToggle = (key: keyof SplunkDataSourceOptions | keyof typeof DEFAULTS) => (v: boolean) => {
+    this.update({ [key as any]: v } as any);
+  };
 
   private resetBanned = () => {
     this.update({
