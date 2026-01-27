@@ -66,7 +66,8 @@ search index=syslog host="$syslogdevice*"
 ```
 
 #### Dashboard variable interpolation
-- The plugin replaces Grafana variables **before** sending SPL to Splunk.  
+
+- The plugin replaces Grafana variables **before** sending SPL to Splunk.
 - For simple wildcard matching:
   - `host="$device*"` → expands `"$device"` to its value, then `*` is a normal Splunk wildcard.
 - For **exact interface** matching (no partials), use a regex against `_raw` (or `message`) that enforces token boundaries **without** consuming the digits or `/` around it:
@@ -83,15 +84,19 @@ search index=syslog host="$syslogdevice*"
 This ensures `1/0/9` does **not** match `21/0/90`, etc.
 
 #### Time range
+
 The plugin automatically sets `earliest_time`/`latest_time` based on the Grafana panel time picker (ISO 8601).
 
 #### Results mapping
-Returned fields are mapped to a Grafana **Table** frame with: `time`, `host`, `message`  
-- `time` ← `_time` (or now if missing)  
-- `host` ← `host` (or `sourceHost`/`hosts`)  
+
+Returned fields are mapped to a Grafana **Table** frame with: `time`, `host`, `message`
+
+- `time` ← `_time` (or now if missing)
+- `host` ← `host` (or `sourceHost`/`hosts`)
 - `message` ← `message` or `_raw`
 
 ### Variables (`$var`) queries
+
 - The **Variable Query Editor** accepts SPL. The first column of the result is used as `{text, value}` for the variable.
 - Guardrails prevent dangerous commands by default (e.g., `sendemail`, `outputlookup`, etc.).
 
@@ -119,18 +124,22 @@ Use **Inspect → Query inspector** to see the proxied URLs and payloads.
 
 ## Troubleshooting
 
-**“Unable to find datasource” (404 on `/api/datasources/proxy/uid/...`)**  
+**“Unable to find datasource” (404 on `/api/datasources/proxy/uid/...`)**
+
 - The data source UID in the panel might be stale. Re-select the data source in the panel, or save/reload the dashboard.
 
-**Empty results, but SPL works in Splunk UI**  
-- Check variable expansion/quoting. Use `inspect` to confirm the final `search=` body.  
+**Empty results, but SPL works in Splunk UI**
+
+- Check variable expansion/quoting. Use `inspect` to confirm the final `search=` body.
 - Try the exact-match example with `regex _raw="(^|[^0-9/])$sysloginterface([^0-9/]|$)"` for interface fields.
 
-**Unexpected token '<' / HTML instead of JSON**  
+**Unexpected token '<' / HTML instead of JSON**
+
 - You’re likely hitting a reverse proxy/page rather than Splunk’s REST (or not going through Grafana’s proxy). Ensure the request is proxied via `/api/datasources/proxy/uid/<UID>/services/...`.
 
-**Permission or TLS errors**  
-- Splunk user must be allowed to run searches via REST.  
+**Permission or TLS errors**
+
+- Splunk user must be allowed to run searches via REST.
 - For self-signed certs, enable “Skip TLS Verify”.
 
 ---

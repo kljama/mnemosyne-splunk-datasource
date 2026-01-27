@@ -14,18 +14,31 @@ import type { SplunkDataSourceOptions, SplunkQuery } from './types';
 // ---------- Guardrails ----------
 function compileBannedRegex(opts: SplunkDataSourceOptions): RegExp | null {
   const src = (opts.bannedCommands ?? '').trim();
-  if (!src) return null;
-  const parts = src.split('\n').map((s) => s.trim()).filter(Boolean);
-  if (!parts.length) return null;
+  if (!src) {
+    return null;
+  }
+  const parts = src
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!parts.length) {
+    return null;
+  }
   return new RegExp(`\\b(${parts.join('|')})\\b`, 'i');
 }
 
 function isQueryDangerous(q: string | undefined, opts: SplunkDataSourceOptions): string | null {
   const text = (q ?? '').trim();
-  if (!text.length) return 'Query is empty.';
-  if (opts.allowDangerousCommands) return null;
+  if (!text.length) {
+    return 'Query is empty.';
+  }
+  if (opts.allowDangerousCommands) {
+    return null;
+  }
   const re = compileBannedRegex(opts);
-  if (re && re.test(text)) return 'Query includes a risky Splunk command and is blocked by guardrails.';
+  if (re && re.test(text)) {
+    return 'Query includes a risky Splunk command and is blocked by guardrails.';
+  }
   return null;
 }
 
@@ -58,7 +71,7 @@ function interpolateSPL(text: string, scopedVars: any): string {
     }
     if (Array.isArray(value)) {
       const parts = value.map((v) => `"${escapeSplunkValue(String(v))}"`);
-      return parts.length > 1 ? `(${parts.join(' OR ')})` : (parts[0] ?? '');
+      return parts.length > 1 ? `(${parts.join(' OR ')})` : parts[0] ?? '';
     }
     return escapeSplunkValue(String(value));
   };
@@ -108,7 +121,9 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
     const frames: DataFrame[] = [];
 
     for (const target of req.targets) {
-      if (target.hide) continue;
+      if (target.hide) {
+        continue;
+      }
 
       // Interpolate dashboard variables into the SPL
       const rawText = target.queryText || '';
@@ -128,14 +143,10 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
         continue;
       }
 
-      const table = new MutableDataFrame({
-        refId: target.refId,
-        fields: [
-          { name: 'time', type: FieldType.time },
-          { name: 'host', type: FieldType.string },
-          { name: 'message', type: FieldType.string },
-        ],
-      });
+      // Accumulate columns in arrays first (optimization)
+      const timeValues: number[] = [];
+      const hostValues: string[] = [];
+      const msgValues: string[] = [];
 
       try {
         const earliest = toSplunkTimeISO(req.range.from.toDate());
@@ -153,20 +164,29 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
         while (true) {
           const res = await this.fetchResults(sid, pageSize, offset);
           const rows = res.results ?? [];
-          if (!rows.length) break;
+          if (!rows.length) {
+            break;
+          }
 
           for (const r of rows) {
             const t = Date.parse(r._time) || Date.now();
             const host = r.host ?? r.sourceHost ?? r.hosts ?? '';
             const msg = r._raw ?? r.message ?? r._msg ?? '';
-            table.add({ time: t, host, message: msg });
+
+            timeValues.push(t);
+            hostValues.push(host);
+            msgValues.push(msg);
           }
 
           totalAdded += rows.length;
-          if (maxRows > 0 && totalAdded >= maxRows) break;
+          if (maxRows > 0 && totalAdded >= maxRows) {
+            break;
+          }
 
           offset += rows.length;
-          if (rows.length < pageSize) break;
+          if (rows.length < pageSize) {
+            break;
+          }
         }
       } catch (err: any) {
         const e = new MutableDataFrame({
@@ -181,6 +201,15 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
         continue;
       }
 
+      const table = new MutableDataFrame({
+        refId: target.refId,
+        fields: [
+          { name: 'time', type: FieldType.time, values: timeValues },
+          { name: 'host', type: FieldType.string, values: hostValues },
+          { name: 'message', type: FieldType.string, values: msgValues },
+        ],
+      });
+
       frames.push(table);
     }
 
@@ -193,7 +222,9 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
     // Interpolate variables here too (in case user references dashboard vars)
     const qText = interpolateSPL(raw, {});
     const validation = isQueryDangerous(qText, this.jsonData);
-    if (validation) return [];
+    if (validation) {
+      return [];
+    }
 
     // Use a cheap time window for variables
     const earliest = '-15m';
@@ -204,11 +235,17 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
       await this.waitForJob(sid);
       const res = await this.fetchResults(sid, 500, 0);
       const rows = res.results ?? [];
-      if (!rows.length) return [];
+      if (!rows.length) {
+        return [];
+      }
 
       let firstField = res.fields?.[0]?.name;
-      if (!firstField) firstField = Object.keys(rows[0] ?? {})[0];
-      if (!firstField) return [];
+      if (!firstField) {
+        firstField = Object.keys(rows[0] ?? {})[0];
+      }
+      if (!firstField) {
+        return [];
+      }
 
       return rows
         .map((r) => r[firstField!])
@@ -249,7 +286,9 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
 
     const data: SplunkJobCreateData = resp?.data ?? resp;
     const { sid } = data || {};
-    if (!sid) throw new Error('Failed to create Splunk search job');
+    if (!sid) {
+      throw new Error('Failed to create Splunk search job');
+    }
     return { sid };
   }
 
@@ -259,7 +298,9 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
 
     for (let i = 0; i < maxPolls; i++) {
       const done = await this.isJobDone(sid);
-      if (done) return;
+      if (done) {
+        return;
+      }
       await sleep(pollMs);
     }
     throw new Error('Splunk job did not complete within polling limits');
@@ -279,7 +320,9 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
 
   private async fetchResults(sid: string, count: number, offset: number): Promise<SplunkResultsData> {
     const resp: any = await getBackendSrv().datasourceRequest({
-      url: `${this.base}/services/search/jobs/${encodeURIComponent(sid)}/results?output_mode=json&count=${count}&offset=${offset}`,
+      url: `${this.base}/services/search/jobs/${encodeURIComponent(
+        sid
+      )}/results?output_mode=json&count=${count}&offset=${offset}`,
       method: 'GET',
     });
     const data: SplunkResultsData = resp?.data ?? resp;
