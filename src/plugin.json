@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "datasource",
+  "name": "Splunk Search",
+  "id": "mnemosyne-splunk-datasource",
+  "metrics": true,
+  "backend": false,
+  "executable": "gpx_splunk_datasource",
+  "info": {
+    "description": "",
+    "author": {
+      "name": "kljama"
+    },
+    "keywords": ["splunk"],
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "links": [],
+    "screenshots": [],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=10.4.0",
+    "plugins": []
+  }
+}
