@@ -27,20 +27,6 @@ function compileBannedRegex(opts: SplunkDataSourceOptions): RegExp | null {
   return new RegExp(`\\b(${parts.join('|')})\\b`, 'i');
 }
 
-function isQueryDangerous(q: string | undefined, opts: SplunkDataSourceOptions): string | null {
-  const text = (q ?? '').trim();
-  if (!text.length) {
-    return 'Query is empty.';
-  }
-  if (opts.allowDangerousCommands) {
-    return null;
-  }
-  const re = compileBannedRegex(opts);
-  if (re && re.test(text)) {
-    return 'Query includes a risky Splunk command and is blocked by guardrails.';
-  }
-  return null;
-}
 
 // ---------- Helpers ----------
 function toSplunkTimeISO(d: Date): string {
@@ -88,12 +74,28 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
   readonly jsonData: SplunkDataSourceOptions;
   // This is the *Grafana-proxied* base URL, e.g. /api/datasources/proxy/uid/<UID>
   private readonly base: string;
+  private readonly bannedRegex: RegExp | null;
 
   constructor(instanceSettings: DataSourceInstanceSettings<SplunkDataSourceOptions>) {
     super(instanceSettings);
     this.jsonData = instanceSettings.jsonData || {};
     const raw = (instanceSettings as any).url ?? (this.jsonData as any)?.url ?? '';
     this.base = String(raw).replace(/\/+$/, '');
+    this.bannedRegex = compileBannedRegex(this.jsonData);
+  }
+
+  private isQueryDangerous(q: string | undefined): string | null {
+    const text = (q ?? '').trim();
+    if (!text.length) {
+      return 'Query is empty.';
+    }
+    if (this.jsonData.allowDangerousCommands) {
+      return null;
+    }
+    if (this.bannedRegex && this.bannedRegex.test(text)) {
+      return 'Query includes a risky Splunk command and is blocked by guardrails.';
+    }
+    return null;
   }
 
   // ---------------- Query (Panels) ----------------
@@ -129,7 +131,7 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
       const rawText = target.queryText || '';
       const queryText = interpolateSPL(rawText, req.scopedVars);
 
-      const validation = isQueryDangerous(queryText, this.jsonData);
+      const validation = this.isQueryDangerous(queryText);
       if (validation) {
         const warn = new MutableDataFrame({
           refId: target.refId,
@@ -221,7 +223,7 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
     const raw = typeof query === 'string' ? query : query.queryText ?? '';
     // Interpolate variables here too (in case user references dashboard vars)
     const qText = interpolateSPL(raw, {});
-    const validation = isQueryDangerous(qText, this.jsonData);
+    const validation = this.isQueryDangerous(qText);
     if (validation) {
       return [];
     }
