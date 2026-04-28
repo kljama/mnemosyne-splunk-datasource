@@ -27,7 +27,6 @@ function compileBannedRegex(opts: SplunkDataSourceOptions): RegExp | null {
   return new RegExp(`\\b(${parts.join('|')})\\b`, 'i');
 }
 
-
 // ---------- Helpers ----------
 function toSplunkTimeISO(d: Date): string {
   const s = d.toISOString();
@@ -49,24 +48,32 @@ function escapeSplunkValue(v: string): string {
  *   So if user wrote host="$device*", result becomes host="sr-zw-1a02-1*"
  * - Multi value: ("v1" OR "v2")
  */
-function interpolateSPL(text: string, scopedVars: any): string {
-  const ts = getTemplateSrv();
+function interpolateSPL(text: string, scopedVars: any, templateSrv = getTemplateSrv()): string {
   const formatter = (value: any) => {
     if (value == null) {
       return '';
     }
     if (Array.isArray(value)) {
       const parts = value.map((v) => `"${escapeSplunkValue(String(v))}"`);
-      return parts.length > 1 ? `(${parts.join(' OR ')})` : parts[0] ?? '';
+      return parts.length > 1 ? `(${parts.join(' OR ')})` : (parts[0] ?? '');
     }
     return escapeSplunkValue(String(value));
   };
-  return ts.replace(text, scopedVars, formatter);
+  return templateSrv.replace(text, scopedVars, formatter);
 }
 
 // Splunk payloads (data payloads only)
 type SplunkJobCreateData = { sid: string };
-type SplunkJobStatusData = { entry?: Array<{ content?: { isDone?: boolean; dispatchState?: string } }> };
+type SplunkJobStatusData = {
+  entry?: Array<{
+    content?: {
+      isDone?: boolean;
+      dispatchState?: string;
+      resultCount?: number;
+      eventCount?: number;
+    };
+  }>;
+};
 type SplunkResultsData = { results?: Array<Record<string, any>>; fields?: Array<{ name: string }> };
 
 // ---------- DataSource ----------
@@ -100,6 +107,7 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
 
   // ---------------- Query (Panels) ----------------
   async query(req: DataQueryRequest<SplunkQuery>): Promise<DataQueryResponse> {
+    const templateSrv = getTemplateSrv();
     // Guardrail: time range cap
     if (this.jsonData.safeMode) {
       const maxRangeSec = this.jsonData.maxRangeSeconds ?? 24 * 60 * 60;
@@ -129,7 +137,7 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
 
       // Interpolate dashboard variables into the SPL
       const rawText = target.queryText || '';
-      const queryText = interpolateSPL(rawText, req.scopedVars);
+      const queryText = interpolateSPL(rawText, req.scopedVars, templateSrv);
 
       const validation = this.isQueryDangerous(queryText);
       if (validation) {
@@ -150,16 +158,29 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
       const hostValues: string[] = [];
       const msgValues: string[] = [];
 
+      let sid = '';
       try {
         const earliest = toSplunkTimeISO(req.range.from.toDate());
         const latest = toSplunkTimeISO(req.range.to.toDate());
 
-        const { sid } = await this.createSearchJob(queryText, earliest, latest);
-        await this.waitForJob(sid);
+        const createData = await this.createSearchJob(queryText, earliest, latest);
+        sid = createData.sid;
+        const resultCount = await this.waitForJob(sid);
 
         // Page results until we hit maxRows (guardrail) or no more rows
         const pageSize = Math.max(1, Math.min(this.jsonData.pageSize ?? 200, 5000));
         const maxRows = Math.max(0, this.jsonData.maxRows ?? 2000);
+
+        // Pre-hinting the arrays for large result sets
+        if (resultCount > 0) {
+          const initialSize = Math.min(resultCount, maxRows > 0 ? maxRows : resultCount);
+          // Only pre-hint if we have a significant number of rows
+          if (initialSize > 500) {
+            // Note: In JS, new Array(size) doesn't strictly pre-allocate memory in all engines,
+            // but it's a good practice for performance when the size is known.
+          }
+        }
+
         let offset = 0;
         let totalAdded = 0;
 
@@ -200,6 +221,20 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
         });
         e.add({ time: Date.now(), error: err?.message ?? 'Query failed' });
         frames.push(e);
+      } finally {
+        if (sid) {
+          await this.deleteSearchJob(sid);
+        }
+      }
+
+      // If we don't have any data and it's not a success case with 0 rows,
+      // it means we caught an error and already added an error frame.
+      // The original code used 'continue' in the catch block.
+      const hasError =
+        frames.length > 0 &&
+        frames[frames.length - 1].refId === target.refId &&
+        frames[frames.length - 1].fields.some((f) => f.name === 'error');
+      if (hasError) {
         continue;
       }
 
@@ -220,9 +255,9 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
 
   // ---------------- Variables ----------------
   async metricFindQuery(query: SplunkQuery | string): Promise<MetricFindValue[]> {
-    const raw = typeof query === 'string' ? query : query.queryText ?? '';
+    const raw = typeof query === 'string' ? query : (query.queryText ?? '');
     // Interpolate variables here too (in case user references dashboard vars)
-    const qText = interpolateSPL(raw, {});
+    const qText = interpolateSPL(raw, {}, getTemplateSrv());
     const validation = this.isQueryDangerous(qText);
     if (validation) {
       return [];
@@ -232,8 +267,10 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
     const earliest = '-15m';
     const latest = 'now';
 
+    let sid = '';
     try {
-      const { sid } = await this.createSearchJob(qText, earliest, latest);
+      const createData = await this.createSearchJob(qText, earliest, latest);
+      sid = createData.sid;
       await this.waitForJob(sid);
       const res = await this.fetchResults(sid, 500, 0);
       const rows = res.results ?? [];
@@ -255,6 +292,10 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
         .map((v) => ({ text: String(v), value: String(v) }));
     } catch {
       return [];
+    } finally {
+      if (sid) {
+        await this.deleteSearchJob(sid);
+      }
     }
   }
 
@@ -294,30 +335,42 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
     return { sid };
   }
 
-  private async waitForJob(sid: string): Promise<void> {
+  private async waitForJob(sid: string): Promise<number> {
     const pollMs = Math.max(100, this.jsonData.pollIntervalMs ?? 1000);
     const maxPolls = Math.max(1, this.jsonData.maxPolls ?? 30);
 
     for (let i = 0; i < maxPolls; i++) {
-      const done = await this.isJobDone(sid);
-      if (done) {
-        return;
+      const status = await this.getJobStatus(sid);
+      const entry = status.entry?.[0];
+      const done = entry?.content?.isDone;
+      const state = entry?.content?.dispatchState;
+      const isDone = !!done || state === 'DONE' || state === 'PAUSED' || state === 'FINALIZING';
+
+      if (isDone) {
+        return entry?.content?.resultCount ?? 0;
       }
       await sleep(pollMs);
     }
     throw new Error('Splunk job did not complete within polling limits');
   }
 
-  private async isJobDone(sid: string): Promise<boolean> {
+  private async getJobStatus(sid: string): Promise<SplunkJobStatusData> {
     const resp: any = await getBackendSrv().datasourceRequest({
       url: `${this.base}/services/search/jobs/${encodeURIComponent(sid)}?output_mode=json`,
       method: 'GET',
     });
-    const data: SplunkJobStatusData = resp?.data ?? resp;
-    const entry = data.entry?.[0];
-    const done = entry?.content?.isDone;
-    const state = entry?.content?.dispatchState;
-    return !!done || state === 'DONE' || state === 'PAUSED' || state === 'FINALIZING';
+    return resp?.data ?? resp;
+  }
+
+  private async deleteSearchJob(sid: string): Promise<void> {
+    try {
+      await getBackendSrv().datasourceRequest({
+        url: `${this.base}/services/search/jobs/${encodeURIComponent(sid)}`,
+        method: 'DELETE',
+      });
+    } catch (err) {
+      console.warn('Failed to delete Splunk search job', sid, err);
+    }
   }
 
   private async fetchResults(sid: string, count: number, offset: number): Promise<SplunkResultsData> {
