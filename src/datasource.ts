@@ -121,6 +121,8 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
     }
 
     const frames: DataFrame[] = [];
+    const earliest = toSplunkTimeISO(req.range.from.toDate());
+    const latest = toSplunkTimeISO(req.range.to.toDate());
 
     for (const target of req.targets) {
       if (target.hide) {
@@ -151,9 +153,6 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
       const msgValues: string[] = [];
 
       try {
-        const earliest = toSplunkTimeISO(req.range.from.toDate());
-        const latest = toSplunkTimeISO(req.range.to.toDate());
-
         const { sid } = await this.createSearchJob(queryText, earliest, latest);
         await this.waitForJob(sid);
 
