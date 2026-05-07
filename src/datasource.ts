@@ -49,8 +49,8 @@ function escapeSplunkValue(v: string): string {
  *   So if user wrote host="$device*", result becomes host="sr-zw-1a02-1*"
  * - Multi value: ("v1" OR "v2")
  */
-function interpolateSPL(text: string, scopedVars: any): string {
-  const ts = getTemplateSrv();
+function interpolateSPL(text: string, scopedVars: any, templateSrv?: any): string {
+  const ts = templateSrv ?? getTemplateSrv();
   const formatter = (value: any) => {
     if (value == null) {
       return '';
@@ -66,7 +66,9 @@ function interpolateSPL(text: string, scopedVars: any): string {
 
 // Splunk payloads (data payloads only)
 type SplunkJobCreateData = { sid: string };
-type SplunkJobStatusData = { entry?: Array<{ content?: { isDone?: boolean; dispatchState?: string } }> };
+type SplunkJobStatusData = {
+  entry?: Array<{ content?: { isDone?: boolean; dispatchState?: string; resultCount?: string | number } }>;
+};
 type SplunkResultsData = { results?: Array<Record<string, any>>; fields?: Array<{ name: string }> };
 
 // ---------- DataSource ----------
@@ -120,18 +122,18 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
       }
     }
 
-    const frames: DataFrame[] = [];
     const earliest = toSplunkTimeISO(req.range.from.toDate());
     const latest = toSplunkTimeISO(req.range.to.toDate());
+    const templateSrv = getTemplateSrv();
 
-    for (const target of req.targets) {
+    const processingPromises = req.targets.map(async (target) => {
       if (target.hide) {
-        continue;
+        return null;
       }
 
       // Interpolate dashboard variables into the SPL
       const rawText = target.queryText || '';
-      const queryText = interpolateSPL(rawText, req.scopedVars);
+      const queryText = interpolateSPL(rawText, req.scopedVars, templateSrv);
 
       const validation = this.isQueryDangerous(queryText);
       if (validation) {
@@ -143,24 +145,33 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
           ],
         });
         warn.add({ time: Date.now(), warning: validation });
-        frames.push(warn);
-        continue;
+        return warn;
       }
 
       // Accumulate columns in arrays first (optimization)
-      const timeValues: number[] = [];
-      const hostValues: string[] = [];
-      const msgValues: string[] = [];
+      let timeValues: number[] = [];
+      let hostValues: string[] = [];
+      let msgValues: string[] = [];
 
+      let sid = '';
       try {
-        const { sid } = await this.createSearchJob(queryText, earliest, latest);
-        await this.waitForJob(sid);
+        const job = await this.createSearchJob(queryText, earliest, latest);
+        sid = job.sid;
+        const resultCount = await this.waitForJob(sid);
 
         // Page results until we hit maxRows (guardrail) or no more rows
         const pageSize = Math.max(1, Math.min(this.jsonData.pageSize ?? 200, 5000));
         const maxRows = Math.max(0, this.jsonData.maxRows ?? 2000);
         let offset = 0;
         let totalAdded = 0;
+
+        // Pre-allocate arrays if we know the size
+        const allocationSize = maxRows > 0 ? Math.min(resultCount, maxRows) : resultCount;
+        if (allocationSize > 0) {
+          timeValues = new Array(allocationSize);
+          hostValues = new Array(allocationSize);
+          msgValues = new Array(allocationSize);
+        }
 
         while (true) {
           const res = await this.fetchResults(sid, pageSize, offset);
@@ -174,12 +185,18 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
             const host = r.host ?? r.sourceHost ?? r.hosts ?? '';
             const msg = r._raw ?? r.message ?? r._msg ?? '';
 
-            timeValues.push(t);
-            hostValues.push(host);
-            msgValues.push(msg);
+            if (allocationSize > 0 && totalAdded < allocationSize) {
+              timeValues[totalAdded] = t;
+              hostValues[totalAdded] = host;
+              msgValues[totalAdded] = msg;
+            } else {
+              timeValues.push(t);
+              hostValues.push(host);
+              msgValues.push(msg);
+            }
+            totalAdded++;
           }
 
-          totalAdded += rows.length;
           if (maxRows > 0 && totalAdded >= maxRows) {
             break;
           }
@@ -198,11 +215,14 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
           ],
         });
         e.add({ time: Date.now(), error: err?.message ?? 'Query failed' });
-        frames.push(e);
-        continue;
+        return e;
+      } finally {
+        if (sid) {
+          await this.deleteSearchJob(sid);
+        }
       }
 
-      const table = new MutableDataFrame({
+      return new MutableDataFrame({
         refId: target.refId,
         fields: [
           { name: 'time', type: FieldType.time, values: timeValues },
@@ -210,9 +230,10 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
           { name: 'message', type: FieldType.string, values: msgValues },
         ],
       });
+    });
 
-      frames.push(table);
-    }
+    const results = await Promise.all(processingPromises);
+    const frames = results.filter((f): f is DataFrame => f !== null);
 
     return { data: frames };
   }
@@ -221,7 +242,8 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
   async metricFindQuery(query: SplunkQuery | string): Promise<MetricFindValue[]> {
     const raw = typeof query === 'string' ? query : query.queryText ?? '';
     // Interpolate variables here too (in case user references dashboard vars)
-    const qText = interpolateSPL(raw, {});
+    const templateSrv = getTemplateSrv();
+    const qText = interpolateSPL(raw, {}, templateSrv);
     const validation = this.isQueryDangerous(qText);
     if (validation) {
       return [];
@@ -231,8 +253,10 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
     const earliest = '-15m';
     const latest = 'now';
 
+    let sid = '';
     try {
-      const { sid } = await this.createSearchJob(qText, earliest, latest);
+      const job = await this.createSearchJob(qText, earliest, latest);
+      sid = job.sid;
       await this.waitForJob(sid);
       const res = await this.fetchResults(sid, 500, 0);
       const rows = res.results ?? [];
@@ -254,6 +278,10 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
         .map((v) => ({ text: String(v), value: String(v) }));
     } catch {
       return [];
+    } finally {
+      if (sid) {
+        await this.deleteSearchJob(sid);
+      }
     }
   }
 
@@ -293,21 +321,21 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
     return { sid };
   }
 
-  private async waitForJob(sid: string): Promise<void> {
+  private async waitForJob(sid: string): Promise<number> {
     const pollMs = Math.max(100, this.jsonData.pollIntervalMs ?? 1000);
     const maxPolls = Math.max(1, this.jsonData.maxPolls ?? 30);
 
     for (let i = 0; i < maxPolls; i++) {
-      const done = await this.isJobDone(sid);
-      if (done) {
-        return;
+      const { isDone, resultCount } = await this.getJobStatus(sid);
+      if (isDone) {
+        return resultCount;
       }
       await sleep(pollMs);
     }
     throw new Error('Splunk job did not complete within polling limits');
   }
 
-  private async isJobDone(sid: string): Promise<boolean> {
+  private async getJobStatus(sid: string): Promise<{ isDone: boolean; resultCount: number }> {
     const resp: any = await getBackendSrv().datasourceRequest({
       url: `${this.base}/services/search/jobs/${encodeURIComponent(sid)}?output_mode=json`,
       method: 'GET',
@@ -316,7 +344,9 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
     const entry = data.entry?.[0];
     const done = entry?.content?.isDone;
     const state = entry?.content?.dispatchState;
-    return !!done || state === 'DONE' || state === 'PAUSED' || state === 'FINALIZING';
+    const resultCount = parseInt(String(entry?.content?.resultCount ?? '0'), 10) || 0;
+    const isDone = !!done || state === 'DONE' || state === 'PAUSED' || state === 'FINALIZING';
+    return { isDone, resultCount };
   }
 
   private async fetchResults(sid: string, count: number, offset: number): Promise<SplunkResultsData> {
@@ -328,5 +358,16 @@ export class DataSource extends DataSourceApi<SplunkQuery, SplunkDataSourceOptio
     });
     const data: SplunkResultsData = resp?.data ?? resp;
     return data;
+  }
+
+  private async deleteSearchJob(sid: string): Promise<void> {
+    try {
+      await getBackendSrv().datasourceRequest({
+        url: `${this.base}/services/search/jobs/${encodeURIComponent(sid)}`,
+        method: 'DELETE',
+      });
+    } catch (err) {
+      console.error('Failed to delete Splunk search job', sid, err);
+    }
   }
 }
